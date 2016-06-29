@@ -18,7 +18,7 @@ import (
 // Service type
 type Service struct {
 	Interval   time.Duration
-	StartTimes []time.Time
+	Start      time.Time
 	Files      []File
 	Bucket     string
 	Account    string
@@ -66,13 +66,19 @@ func (srv *Service) Run() {
 	}
 	srv.bucket = client.Bucket(srv.Bucket)
 
+	if !srv.Start.IsZero() {
+
+	}
 	srv.doBakap(srv.Files)
 	if srv.Interval == 0 {
 		return
 	}
+
 	for {
-		time.Sleep(srv.Interval)
-		srv.doBakap(srv.Files)
+		select {
+		case <-time.Tick(srv.Interval):
+			srv.doBakap(srv.Files)
+		}
 	}
 }
 
