@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"time"
 
 	"golang.org/x/net/context"
@@ -14,30 +15,45 @@ import (
 	"google.golang.org/cloud/storage"
 )
 
-// Config type
-type Config struct {
+// Service type
+type Service struct {
 	Interval   time.Duration
+	StartTimes []time.Time
 	Files      []File
 	Bucket     string
 	Account    string
 	PrivateKey []byte
+	PreScript  string
+	PostScript string
+	NamingFunc NamingFunc
+	Async      bool
+
+	bucket *storage.BucketHandle
 }
 
 // File type
 type File struct {
-	Src  string
-	Dest string
+	Src        string
+	Dest       string
+	PreScript  string
+	PostScript string
 }
 
-var bucket *storage.BucketHandle
+// NamingFunc type
+type NamingFunc func(File) string
 
-// Start Bakap
-func Start(c Config) {
+// Run Bakap blocking service
+func (srv *Service) Run() {
 	var err error
 
+	// fill default value
+	if srv.NamingFunc == nil {
+		srv.NamingFunc = generateName
+	}
+
 	googleConf := &jwt.Config{
-		Email:      c.Account,
-		PrivateKey: c.PrivateKey,
+		Email:      srv.Account,
+		PrivateKey: srv.PrivateKey,
 		TokenURL:   google.JWTTokenURL,
 		Scopes:     []string{storage.ScopeReadWrite},
 	}
@@ -48,44 +64,69 @@ func Start(c Config) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	bucket = client.Bucket(c.Bucket)
+	srv.bucket = client.Bucket(srv.Bucket)
 
-	doBakap(c.Files)
-	if c.Interval == 0 {
+	srv.doBakap(srv.Files)
+	if srv.Interval == 0 {
 		return
 	}
 	for {
-		time.Sleep(c.Interval)
-		doBakap(c.Files)
+		time.Sleep(srv.Interval)
+		srv.doBakap(srv.Files)
 	}
 }
 
-func doBakap(fs []File) {
-	for i, f := range fs {
-		log.Println("bakap: start ", time.Now())
-		log.Printf("bakap: kap %d, %s => %s\n", i, f.Src, f.Dest)
-		uploadFile(f)
-		log.Println("bakap: end ", time.Now())
+func (srv *Service) doBakap(fs []File) {
+	log.Println("bakap: start")
+	for _, f := range fs {
+		if srv.Async {
+			go srv.bak(f)
+		} else {
+			srv.bak(f)
+		}
 	}
+	log.Println("bakap: end")
 }
 
-func uploadFile(f File) error {
+func (srv *Service) bak(f File) error {
+	log.Printf("bakap: kap %s => %s\n", f.Src, f.Dest)
+
+	if f.PreScript != "" {
+		runScript(f.PreScript)
+	}
+
 	fs, err := os.Open(f.Src)
 	if err != nil {
+		log.Printf("bakap: kap error %s\n", f.Src)
 		return err
 	}
 	defer fs.Close()
 
-	fileName := fmt.Sprintf("[%s] %s", time.Now().Format(time.RFC3339), f.Dest)
+	fileName := srv.NamingFunc(f)
 
 	ctx := context.Background()
-	w := bucket.Object(fileName).NewWriter(ctx)
+	w := srv.bucket.Object(fileName).NewWriter(ctx)
 	if _, err := io.Copy(w, fs); err != nil {
+		log.Printf("bakap: kap error %s\n", f.Src)
 		return err
 	}
 	if err := w.Close(); err != nil {
+		log.Printf("bakap: kap error %s\n", f.Src)
 		return err
 	}
 
+	if f.PostScript != "" {
+		runScript(f.PostScript)
+	}
+
+	log.Printf("bakap: kap end %s\n", f.Src)
 	return nil
+}
+
+func generateName(f File) string {
+	return fmt.Sprintf("[%s] %s", time.Now().Format(time.RFC3339), f.Dest)
+}
+
+func runScript(script string) error {
+	return exec.Command("/bin/bash", "-c", script).Run()
 }
